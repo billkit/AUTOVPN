@@ -695,64 +695,70 @@ def rename_node(p, country_counter, CN_TO_CC):
         return p
 
 # ---------------- Load proxies ----------------
-def load_proxies(url, retries=10):
-    attempt = 0
-    while attempt < retries:
+def load_proxies(url, retries=5):
+    headers = {
+        "User-Agent": "Clash/1.18 (GitHub Actions; Python)",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "close",
+    }
+
+    for attempt in range(1, retries + 1):
         try:
-            r = requests.get(url, timeout=15)
-            r.raise_for_status()
-            text = r.text.strip()
+            resp = requests.get(url, headers=headers, timeout=20)
+            status = resp.status_code
 
-            print(f"[fetch] 📥 {len(text.splitlines())} lines fetched from subscription link", flush=True)
-            for line in text.splitlines()[:5]:
-                print("       ", line[:80], flush=True)
+            if status in (401, 403):
+                print(f"[FATAL] 🚫 HTTP {status} Forbidden — subscription blocked in CI", flush=True)
+                sys.exit(1)
 
-            nodes = []
+            if status != 200:
+                raise RuntimeError(f"HTTP {status}")
 
-            if len(text.splitlines()) == 1 and re.match(r'^[A-Za-z0-9+/=]+$', text):
+            text = resp.text.strip()
+            if not text:
+                raise RuntimeError("empty response")
+
+            print(f"[fetch] 📥 HTTP 200, {len(text)} chars fetched", flush=True)
+
+            # -------- base64 auto detect --------
+            if (
+                len(text.splitlines()) == 1
+                and re.fullmatch(r"[A-Za-z0-9+/=_-]+", text)
+            ):
                 try:
                     decoded = base64.b64decode(text + "=" * (-len(text) % 4)).decode("utf-8")
                     text = decoded
-                    print(f"[decode] 🔓 Base64 decoded -> {len(text.splitlines())} lines", flush=True)
-                except Exception as e:
-                    print(f"[warn] 😭 Base64 decode failed: {e}", flush=True)
+                    print(f"[decode] 🔓 base64 decoded -> {len(text.splitlines())} lines", flush=True)
+                except Exception:
+                    print("[warn] ⚠️ base64 detected but decode failed", flush=True)
 
-            if text.startswith("proxies:") or "proxies:" in text:
-                try:
-                    data = yaml.safe_load(text)
-                    if data and "proxies" in data:
-                        for p in data["proxies"]:
-                            nodes.append(p)
-                            print(f"[parse] 🔎 YAML node: {p.get('name', '')}", flush=True)
-                    else:
-                        print("[warn] 😭 YAML structure invalid or empty", flush=True)
-                except Exception as e:
-                    print(f"[warn] 😭 YAML parsing failed: {e}", flush=True)
-            else:
-                for line in text.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        node = parse_node_line(line)
-                        if node:
-                            print(f"[parsed] 🔎 {json.dumps(node, ensure_ascii=False)}", flush=True)
-                            nodes.append(node)
-                        else:
-                            print(f"[skip] ⛔ Invalid or unsupported line -> {line[:60]}...", flush=True)
-                    except Exception as e:
-                        print(f"[warn] 😭 Error parsing line: {e}", flush=True)
+            nodes = []
+
+            # -------- YAML --------
+            if "proxies:" in text:
+                data = yaml.safe_load(text)
+                for p in data.get("proxies", []):
+                    nodes.append(p)
+                return nodes
+
+            # -------- URI lines --------
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                node = parse_node_line(line)
+                if node:
+                    nodes.append(node)
 
             return nodes
 
         except Exception as e:
-            attempt += 1
-            print("[warn] 😭 Failed to fetch from current subscription link", flush=True)
-            print(f"[attempt] 🔄️ Try to fetch again (attempt {attempt}/{retries})", flush=True)
+            print(f"[warn] 😭 fetch failed ({attempt}/{retries}) -> {e}", flush=True)
+            time.sleep(2)
 
-            if attempt >= retries:
-                print("[abort] 🚫 Max retries reached. Aborting process.", flush=True)
-                exit(1)
+    print("[abort] 🚫 All retries failed, aborting", flush=True)
+    sys.exit(1)
 
 # ---------------- Main ----------------
 def main():
